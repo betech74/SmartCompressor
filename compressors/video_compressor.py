@@ -28,11 +28,12 @@ def compress(src, dst, use_gpu=False, progress_callback=None):
             use_nvenc = False
 
         total_duration = 0.0
+        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         try:
             result = subprocess.run(
                 [ffprobe, "-v", "error", "-show_entries", "format=duration",
                  "-of", "default=noprint_wrappers=1:nokey=1", src],
-                capture_output=True, text=True, env=env
+                capture_output=True, text=True, env=env, creationflags=creationflags
             )
             out = (result.stdout or "").strip()
             total_duration = float(out) if out else 0.0
@@ -67,7 +68,8 @@ def compress(src, dst, use_gpu=False, progress_callback=None):
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
-            env=env
+            env=env,
+            creationflags=creationflags
         )
 
         if process.stdout:

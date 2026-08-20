@@ -1,1 +1,3 @@
 ruff
+pyinstaller==6.14.2
+pyinstaller-hooks-contrib==2025.5

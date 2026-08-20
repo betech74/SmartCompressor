@@ -6,6 +6,7 @@ from datetime import datetime
 import time
 import threading
 import json
+import queue
 import config
 from tkinter import (
     Tk,
@@ -457,6 +458,10 @@ class App(TkinterDnD.Tk):
         self.src_dir = ""
         self.dst_dir = ""
         self.files_to_process = []
+        self.failed_files = []
+        self._analysis_queue = queue.Queue()
+        self._analysis_poll_job = None
+        self._analysis_running = False
         self.log_color_enabled = config.LOG_COLOR
         self._border_frames = []
         self._bg_frames = []
@@ -523,6 +528,7 @@ class App(TkinterDnD.Tk):
             style="Uiverse.Primary.TButton"
         )
         btn_analyze.grid(row=0, column=0, padx=6, pady=4, sticky=W)
+        self.btn_analyze = btn_analyze
         self._register_text(btn_analyze, "btn_analyze")
 
         chk_auto_analyze = ttk.Checkbutton(
@@ -553,11 +559,12 @@ class App(TkinterDnD.Tk):
         btn_compress = ttk.Button(
             inner_options,
             text=self.t("btn_compress"),
-            command=lambda: self._debounced("btn_compress") and threading.Thread(target=self.compress_thread).start(),
+            command=lambda: self._debounced("btn_compress") and self.start_compression(),
             width=12,
             style="Uiverse.Primary.TButton"
         )
         btn_compress.grid(row=2, column=0, padx=6, pady=(8, 4), sticky=W)
+        self.btn_compress = btn_compress
         self._register_text(btn_compress, "btn_compress")
 
         btn_settings = ttk.Button(
@@ -720,6 +727,7 @@ class App(TkinterDnD.Tk):
             style="Uiverse.TButton"
         )
         btn_clear.pack(pady=2)
+        self.btn_clear = btn_clear
         self._register_text(btn_clear, "btn_clear")
 
         self.total_original = 0
@@ -868,8 +876,14 @@ class App(TkinterDnD.Tk):
         self.log_scroll.set(first, last)
 
     def log(self, text: str):
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                self.after(0, self.log, text)
+            except RuntimeError:
+                pass
+            return
+
         self.log_widget.config(state="normal")
-        log_event("UI log appended")
         tag = self._tag_for_log_line(text)
         if tag:
             self.log_widget.insert(END, text + "\n", tag)
@@ -877,7 +891,6 @@ class App(TkinterDnD.Tk):
             self.log_widget.insert(END, text + "\n")
         self.log_widget.see(END)
         self.log_widget.config(state="disabled")
-        self.update_idletasks()
 
     def select_folder(self, event=None):
         path = filedialog.askdirectory(title=self.t("select_folder_title"))
@@ -903,42 +916,119 @@ class App(TkinterDnD.Tk):
             log_event("Analyze blocked: no source selected")
             return
 
+        if self._analysis_running:
+            log_event("Analyze ignored: analysis already running")
+            return
+
+        source_dir = self.src_dir
         self.files_to_process.clear()
         self.total_original = 0
-        total_estimated = 0
-        log_event(f"Analyze started: source={self.src_dir}")
+        self._analysis_running = True
+        log_event(f"Analyze started: source={source_dir}")
 
         self.log("\n" + self.t("log_analyzing"))
+        self.btn_analyze.configure(state="disabled")
+        self.btn_compress.configure(state="disabled")
 
-        for f in scan_folder(self.src_dir):
-            ext = os.path.splitext(f)[1].lower()
-            if ext in SUPPORTED_IMAGE + SUPPORTED_VIDEO + SUPPORTED_TEXT + SUPPORTED_PDF:
-                self.files_to_process.append(f)
-                o = os.path.getsize(f)
-                e = estimate_size(f)
-                self.total_original += o
-                total_estimated += e
-                self.log(
+        while True:
+            try:
+                self._analysis_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        self._analysis_poll_job = self.after(50, self._poll_analysis_queue)
+        threading.Thread(
+            target=self._analyse_worker,
+            args=(source_dir,),
+            name="analysis",
+            daemon=True,
+        ).start()
+
+    def _analyse_worker(self, source_dir):
+        files = []
+        total_original = 0
+        total_estimated = 0
+
+        try:
+            for f in scan_folder(source_dir):
+                ext = os.path.splitext(f)[1].lower()
+                if ext not in SUPPORTED_IMAGE + SUPPORTED_VIDEO + SUPPORTED_TEXT + SUPPORTED_PDF:
+                    continue
+
+                try:
+                    original_size = os.path.getsize(f)
+                    estimated_size = estimate_size(f)
+                except OSError as exc:
+                    self._analysis_queue.put((
+                        "log",
+                        f"Erreur: fichier ignoré, taille inaccessible: {f} ({exc})",
+                    ))
+                    continue
+
+                files.append(f)
+                total_original += original_size
+                total_estimated += estimated_size
+                self._analysis_queue.put((
+                    "log",
                     self.t(
                         "log_analyze_line",
                         name=os.path.basename(f),
-                        original=human(o),
-                        estimated=human(e),
-                        gain=human(o - e),
-                    )
-                )
+                        original=human(original_size),
+                        estimated=human(estimated_size),
+                        gain=human(original_size - estimated_size),
+                    ),
+                ))
 
-        self.log("\n" + self.t("log_separator"))
-        self.log(self.t("log_total_original", value=human(self.total_original)))
-        self.log(self.t("log_total_estimated", value=human(total_estimated)))
-        self.log(self.t("log_total_gain", value=human(self.total_original - total_estimated)))
-        self.log(self.t("log_separator") + "\n")
-        log_event(
-            "Analyze finished: "
-            f"total_original={self.total_original} "
-            f"total_estimated={total_estimated} "
-            f"files={len(self.files_to_process)}"
-        )
+            self._analysis_queue.put((
+                "done",
+                files,
+                total_original,
+                total_estimated,
+            ))
+        except Exception as exc:
+            log_event(f"Analyze failed: source={source_dir} error={exc}")
+            self._analysis_queue.put(("error", str(exc)))
+
+    def _poll_analysis_queue(self):
+        self._analysis_poll_job = None
+        processed = 0
+
+        while processed < 40:
+            try:
+                event = self._analysis_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            processed += 1
+            kind = event[0]
+            if kind == "log":
+                self.log(event[1])
+            elif kind == "done":
+                _, files, total_original, total_estimated = event
+                self.files_to_process = files
+                self.total_original = total_original
+                self._analysis_running = False
+                self.log("\n" + self.t("log_separator"))
+                self.log(self.t("log_total_original", value=human(total_original)))
+                self.log(self.t("log_total_estimated", value=human(total_estimated)))
+                self.log(self.t("log_total_gain", value=human(total_original - total_estimated)))
+                self.log(self.t("log_separator") + "\n")
+                log_event(
+                    "Analyze finished: "
+                    f"total_original={total_original} "
+                    f"total_estimated={total_estimated} files={len(files)}"
+                )
+                self.btn_analyze.configure(state="normal")
+                self.btn_compress.configure(state="normal" if files else "disabled")
+            elif kind == "error":
+                self._analysis_running = False
+                self.files_to_process.clear()
+                self.log(f"Erreur pendant l'analyse: {event[1]}")
+                self.btn_analyze.configure(state="normal")
+                self.btn_compress.configure(state="disabled")
+
+        if self._analysis_running or not self._analysis_queue.empty():
+            self._analysis_poll_job = self.after(50, self._poll_analysis_queue)
 
     def clear_log(self):
         self.log_widget.config(state="normal")
@@ -953,28 +1043,98 @@ class App(TkinterDnD.Tk):
             self.dst_label.config(text=self.t("dst_selected", path=self.dst_dir))
             log_event(f"Destination selected: {path}")
 
-    def compress_thread(self):
+    def start_compression(self):
+        if self._analysis_running:
+            return
         if not self.files_to_process:
             self.show_dialog(self.t("msg_warn_title"), self.t("msg_analyze_first"), "warning")
             log_event("Compress blocked: analyze not done")
             return
-
         if not self.dst_dir:
             self.show_dialog(self.t("msg_warn_title"), self.t("msg_select_destination"), "warning")
             log_event("Compress blocked: no destination selected")
             return
 
         self.clear_log()
+        self.failed_files = []
+        self.btn_compress.configure(state="disabled")
+        threading.Thread(
+            target=self.compress_thread,
+            name="compression",
+            daemon=True,
+        ).start()
+
+    def _prepare_file_progress(self, visible):
+        if visible:
+            self.lbl_prog_file.pack()
+            self.progress_file.pack(pady=(8, 6))
+            self.progress_file_label.pack()
+            self.progress_file["value"] = 0
+            self.progress_file["maximum"] = 100
+            self.progress_file_label.config(text="0%")
+        else:
+            self.lbl_prog_file.pack_forget()
+            self.progress_file.pack_forget()
+            self.progress_file_label.pack_forget()
+
+    def _update_global_progress(self, current, total, file_percent=100):
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                self.after(0, self._update_global_progress, current, total, file_percent)
+            except RuntimeError:
+                pass
+            return
+
+        self.progress_global["value"] = current
+        global_percent = ((current - 1) + file_percent / 100) / total * 100 if total else 100
+        self.progress_global_label.config(
+            text=self.t(
+                "progress_files",
+                percent=f"{global_percent:.1f}%",
+                current=current,
+                total=total,
+            )
+        )
+
+    def _prepare_global_progress(self, total):
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                self.after(0, self._prepare_global_progress, total)
+            except RuntimeError:
+                pass
+            return
+        self.progress_global["maximum"] = total
+        self.progress_global["value"] = 0
+
+    def compress_thread(self):
+        if not self.files_to_process:
+            log_event("Compress blocked: analyze not done")
+            return
+
+        if not self.dst_dir:
+            log_event("Compress blocked: no destination selected")
+            return
 
         use_gpu = has_nvenc()
         log_event(f"Compression started: files={len(self.files_to_process)} use_gpu={use_gpu}")
         total_files = len(self.files_to_process)
-        self.progress_global["maximum"] = total_files
-        self.progress_global["value"] = 0
         self.total_compressed = 0
+        source_folder_name = os.path.basename(os.path.normpath(self.src_dir))
+        output_root = os.path.join(self.dst_dir, source_folder_name)
+
+        try:
+            os.makedirs(output_root, exist_ok=True)
+        except OSError as exc:
+            self.log(f"Erreur: destination inaccessible: {output_root} ({exc})")
+            log_event(f"Compression stopped: destination unavailable: {output_root} error={exc}")
+            self.after(0, self.btn_compress.configure, {"state": "normal"})
+            return
+
+        self._prepare_global_progress(total_files)
+        aborted = False
+        failed_files = []
 
         for i, f in enumerate(self.files_to_process, 1):
-            source_folder_name = os.path.basename(os.path.normpath(self.src_dir))
             rel = os.path.relpath(f, self.src_dir)
             dst = os.path.join(self.dst_dir, source_folder_name, rel)
             ext = os.path.splitext(f)[1].lower()
@@ -982,31 +1142,56 @@ class App(TkinterDnD.Tk):
             self.log(self.t("log_compressing", name=os.path.basename(f)))
             log_event(f"Compressing file: {f}")
 
-            f_size = os.path.getsize(f)
+            try:
+                f_size = os.path.getsize(f)
+            except OSError as exc:
+                self.log(f"Erreur: fichier source ignoré: {f} ({exc})")
+                if ext in SUPPORTED_IMAGE + SUPPORTED_VIDEO:
+                    failed_files.append(f)
+                self._update_global_progress(i, total_files)
+                continue
+
             if f_size > 10 * 1024 * 1024:
-                self.lbl_prog_file.pack()
-                self.progress_file.pack(pady=(8, 6))
-                self.progress_file_label.pack()
-                self.progress_file["value"] = 0
-                self.progress_file["maximum"] = 100
-                self.progress_file_label.config(text="0%")
+                self.after(0, self._prepare_file_progress, True)
                 cb = self.update_file_progress
             else:
-                self.lbl_prog_file.pack_forget()
-                self.progress_file.pack_forget()
-                self.progress_file_label.pack_forget()
+                self.after(0, self._prepare_file_progress, False)
                 cb = None
 
-            dispatch((f, dst, ext, use_gpu, cb))
+            result = dispatch((f, dst, ext, use_gpu, cb))
+            success = result[2] if len(result) > 2 else os.path.isfile(dst)
+            if not success:
+                if ext in SUPPORTED_IMAGE + SUPPORTED_VIDEO:
+                    failed_files.append(f)
+                self.log(f"Erreur: sortie non créée pour {os.path.basename(f)}")
+                log_event(f"Compression failed: source={f} output={dst}")
+                try:
+                    destination_available = os.path.isdir(output_root)
+                except OSError:
+                    destination_available = False
+                if not destination_available:
+                    self.log(f"Erreur: destination NAS indisponible, arrêt: {output_root}")
+                    log_event(f"Compression stopped: NAS unavailable: {output_root}")
+                    aborted = True
+                    break
+                self._update_global_progress(i, total_files)
+                continue
 
             original_size = f_size
-            compressed_size = os.path.getsize(dst)
+            try:
+                compressed_size = os.path.getsize(dst)
+            except OSError as exc:
+                if ext in SUPPORTED_IMAGE + SUPPORTED_VIDEO:
+                    failed_files.append(f)
+                self.log(f"Erreur: sortie inaccessible pour {os.path.basename(f)} ({exc})")
+                log_event(f"Output size unavailable: {dst} error={exc}")
+                aborted = True
+                break
             self.total_compressed += compressed_size
 
             percent_file = (compressed_size / original_size) * 100 if original_size > 0 else 100
             if cb:
-                self.progress_file["value"] = 100
-                self.progress_file_label.config(text=f"{percent_file:.1f}%")
+                self.after(0, self.update_file_progress, 100)
             self.log(
                 self.t(
                     "log_compressed_percent",
@@ -1020,43 +1205,47 @@ class App(TkinterDnD.Tk):
                 f"percent={percent_file:.1f}"
             )
 
-            self.progress_global["value"] = i
-            global_percent = ((i - 1) + self.progress_file["value"] / 100) / total_files * 100
-            self.progress_global_label.config(
-                text=self.t(
-                    "progress_files",
-                    percent=f"{global_percent:.1f}%",
-                    current=i,
-                    total=total_files,
+            self._update_global_progress(i, total_files, 100)
+
+        if not aborted:
+            self.log(
+                "\n"
+                + self.t(
+                    "log_done",
+                    path=os.path.join(self.dst_dir, source_folder_name),
                 )
             )
-            self.update_idletasks()
-
-        self.log(
-            "\n"
-            + self.t(
-                "log_done",
-                path=os.path.join(self.dst_dir, source_folder_name),
-            )
-        )
+        self.failed_files = failed_files
+        if failed_files:
+            self.log("\n" + self.t("log_skipped_files", count=len(failed_files)))
+            for failed_file in failed_files:
+                self.log(failed_file)
+                log_event(f"Skipped media file: {failed_file}")
         log_event(
-            "Compression finished: "
-            f"total_original={self.total_original} "
-            f"total_compressed={self.total_compressed} "
-            f"output={os.path.join(self.dst_dir, source_folder_name)}"
+            ("Compression stopped: " if aborted else "Compression finished: ")
+            + f"total_original={self.total_original} "
+            + f"total_compressed={self.total_compressed} "
+            + f"output={os.path.join(self.dst_dir, source_folder_name)}"
         )
         self.log(self.t("log_separator"))
         self.log(self.t("log_total_original", value=human(self.total_original)))
         self.log(self.t("log_total_compressed", value=human(self.total_compressed)))
         self.log(self.t("log_total_gain", value=human(self.total_original - self.total_compressed)))
         self.log(self.t("log_separator"))
-        self.progress_global_label.config(text="100%")
-        self.progress_file_label.config(text="100%")
+        self.after(0, self.progress_global_label.config, {"text": "100%" if not aborted else "Arrêté"})
+        self.after(0, self.progress_file_label.config, {"text": "100%" if not aborted else "Arrêté"})
+        self.after(0, self.btn_compress.configure, {"state": "normal"})
 
     def update_file_progress(self, percent):
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                self.after(0, self.update_file_progress, percent)
+            except RuntimeError:
+                pass
+            return
+
         self.progress_file["value"] = percent
         self.progress_file_label.config(text=f"{percent:.1f}%")
-        self.update_idletasks()
 
     def open_settings_window(self):
         if self._settings_window and self._settings_window.winfo_exists():

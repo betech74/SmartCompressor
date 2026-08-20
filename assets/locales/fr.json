@@ -24,6 +24,7 @@
   "log_analyzing": "🔍 Analyse en cours...",
   "log_analyze_line": "{name} | Original: {original} | Estimé: {estimated} | Gain: {gain}",
   "log_separator": "=================================",
+  "log_skipped_files": "Fichiers images/videos ignores ({count}) :",
   "log_total_original": "TOTAL ORIGINAL : {value}",
   "log_total_estimated": "TOTAL ESTIMÉ   : {value}",
   "log_total_compressed": "TOTAL COMPRESSÉ : {value}",

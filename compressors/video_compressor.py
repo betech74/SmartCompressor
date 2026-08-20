@@ -1,12 +1,15 @@
 import subprocess
 import os
 import config
-import shutil
 
 from utils.paths import bundled_path
+from utils.process import hidden_process_kwargs
 
 def compress(src, dst, use_gpu=False, progress_callback=None):
     try:
+        if not os.path.isfile(src):
+            raise FileNotFoundError(f"Source vidéo introuvable: {src}")
+
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         ext_lower = os.path.splitext(src)[1].lower()
         crf = config.VIDEO_CRF
@@ -28,16 +31,19 @@ def compress(src, dst, use_gpu=False, progress_callback=None):
             use_nvenc = False
 
         total_duration = 0.0
-        creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        process_kwargs = hidden_process_kwargs()
         try:
             result = subprocess.run(
                 [ffprobe, "-v", "error", "-show_entries", "format=duration",
                  "-of", "default=noprint_wrappers=1:nokey=1", src],
-                capture_output=True, text=True, env=env, creationflags=creationflags
+                capture_output=True, text=True, env=env, **process_kwargs
             )
+            if result.returncode != 0:
+                details = (result.stderr or result.stdout or "échec de ffprobe").strip()
+                raise RuntimeError(f"Vidéo illisible: {details[-500:]}")
             out = (result.stdout or "").strip()
             total_duration = float(out) if out else 0.0
-        except Exception:
+        except (OSError, ValueError, subprocess.SubprocessError):
             total_duration = 0.0
 
         if use_nvenc:
@@ -69,7 +75,7 @@ def compress(src, dst, use_gpu=False, progress_callback=None):
             text=True,
             bufsize=1,
             env=env,
-            creationflags=creationflags
+            **process_kwargs
         )
 
         if process.stdout:
@@ -86,15 +92,23 @@ def compress(src, dst, use_gpu=False, progress_callback=None):
 
         process.wait()
 
+        if process.returncode != 0 or not os.path.isfile(dst):
+            raise RuntimeError(
+                f"FFmpeg a échoué (code {process.returncode}) ou n'a pas créé la sortie"
+            )
+
         if progress_callback:
             progress_callback(100)
+        return True
 
     except Exception as e:
         print(f"Erreur compression vidéo {src} : {e}")
 
         try:
-            shutil.copy2(src, dst)
-        except Exception as e2:
-            print(f"Erreur fallback copie {src} : {e2}")
+            if os.path.isfile(dst):
+                os.remove(dst)
+        except OSError as cleanup_error:
+            print(f"Erreur nettoyage sortie video {dst} : {cleanup_error}")
         if progress_callback:
             progress_callback(100)
+        return False

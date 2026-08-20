@@ -14,6 +14,8 @@ VIDEO_WORKERS = min(8, os.cpu_count() or 4)
 VIDEO_PARALLEL_THRESHOLD = 10 * 1024 * 1024
 
 def dispatch(task):
+    success = False
+    media = task[2].lower() in SUPPORTED_IMAGE + SUPPORTED_VIDEO
     try:
         if len(task) == 5:
             src, dst, ext, use_gpu, progress_callback = task
@@ -25,24 +27,32 @@ def dispatch(task):
         ext_lower = ext.lower()
 
         if ext_lower in SUPPORTED_IMAGE:
-            image_compressor.compress(src, dst, use_gpu=use_gpu, progress_callback=progress_callback)
+            result = image_compressor.compress(src, dst, use_gpu=use_gpu, progress_callback=progress_callback)
         elif ext_lower in SUPPORTED_VIDEO:
-            video_compressor.compress(src, dst, use_gpu=use_gpu, progress_callback=progress_callback)
+            result = video_compressor.compress(src, dst, use_gpu=use_gpu, progress_callback=progress_callback)
         elif ext_lower in SUPPORTED_TEXT:
-            text_compressor.compress(src, dst, progress_callback=progress_callback)
+            result = text_compressor.compress(src, dst, progress_callback=progress_callback)
         elif ext_lower in SUPPORTED_PDF:
-            pdf_compressor.compress(src, dst, progress_callback=progress_callback)
+            result = pdf_compressor.compress(src, dst, progress_callback=progress_callback)
+        else:
+            result = False
+
+        success = result is not False and os.path.isfile(dst)
+        if not success:
+            raise OSError(f"La sortie n'a pas été créée: {dst}")
 
     except Exception as e:
         print(f"Erreur lors du traitement de {task[0]} : {e}")
 
-        try:
-            import shutil
-            shutil.copy2(task[0], task[1])
-        except Exception as e2:
-            print(f"Erreur fallback copie {task[0]} : {e2}")
+        if not media:
+            try:
+                import shutil
+                shutil.copy2(task[0], task[1])
+                success = os.path.isfile(task[1])
+            except Exception as e2:
+                print(f"Erreur fallback copie {task[0]} : {e2}")
 
-    return task[0], task[1]
+    return task[0], task[1], success
 
 def run(tasks):
     """

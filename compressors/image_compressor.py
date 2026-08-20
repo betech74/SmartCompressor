@@ -35,7 +35,7 @@ def compress(src, dst, use_gpu=False, progress_callback=None):
                 shutil.copy2(src, dst)
                 if progress_callback:
                     progress_callback(100)
-                return
+                return True
 
         compressed_size = os.path.getsize(dst)
         if compressed_size >= original_size:
@@ -48,20 +48,21 @@ def compress(src, dst, use_gpu=False, progress_callback=None):
 
         if progress_callback:
             progress_callback(100)
+        return True
 
     except PermissionError:
-        try:
-            shutil.copy2(src, dst)
-        except Exception as e:
-            print(f"Erreur copie fallback image {src} : {e}")
+        print(f"Erreur accès image {src}")
         if progress_callback:
             progress_callback(100)
+        return False
 
     except Exception as e:
         print(f"Erreur compression image {src} : {e}")
         try:
-            shutil.copy2(src, dst)
-        except Exception:
-            pass
+            if os.path.isfile(dst):
+                os.remove(dst)
+        except OSError as cleanup_error:
+            print(f"Erreur nettoyage sortie image {dst} : {cleanup_error}")
         if progress_callback:
             progress_callback(100)
+        return False

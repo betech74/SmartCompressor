@@ -2,6 +2,8 @@ import os
 import sys
 import subprocess
 
+from utils.process import hidden_process_kwargs
+
 try:
     from utils.paths import bundled_path
 except Exception:
@@ -31,7 +33,8 @@ def has_nvenc() -> bool:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
-            env=env
+            env=env,
+            **hidden_process_kwargs(),
         )
         out = r.stdout or ""
         return ("h264_nvenc" in out) or ("hevc_nvenc" in out)

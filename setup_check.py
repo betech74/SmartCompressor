@@ -4,6 +4,8 @@ import subprocess
 import importlib.util
 import os
 
+from utils.process import hidden_process_kwargs
+
 try:
     from utils.paths import bundled_path
 except Exception:
@@ -45,7 +47,6 @@ def check_python():
 
 def check_ffmpeg():
     ffmpeg, _, env = get_ffmpeg_paths()
-
     if ffmpeg == "ffmpeg":
         if not shutil.which("ffmpeg"):
             fail("FFmpeg introuvable dans le PATH")
@@ -56,7 +57,8 @@ def check_ffmpeg():
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=True,
-            env=env
+            env=env,
+            **hidden_process_kwargs(),
         )
         ok("FFmpeg détecté")
     except Exception:
@@ -70,7 +72,8 @@ def check_nvenc():
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
-            env=env
+            env=env,
+            **hidden_process_kwargs(),
         )
 
         if ("h264_nvenc" in r.stdout) or ("hevc_nvenc" in r.stdout):

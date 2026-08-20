@@ -5,6 +5,7 @@ from PIL import Image
 import fitz
 import brotli
 from tqdm import tqdm
+from utils.process import hidden_process_kwargs
 
 IMAGE_QUALITY = 75
 VIDEO_CRF = 28
@@ -69,7 +70,12 @@ def compress_video(src, dst):
         cmd += ["-c:v", "libx264", "-crf", str(VIDEO_CRF)]
 
     cmd += ["-preset", "slow", "-c:a", "aac", dst]
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        **hidden_process_kwargs(),
+    )
 
 def main():
     print("\nSelect source folder")

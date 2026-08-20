@@ -15,8 +15,7 @@ def compress(src, dst, use_gpu=False, progress_callback=None):
         if progress_callback:
             progress_callback(100)
 
-    except Exception as e:
-        print(f"Erreur compression texte pour {src} : {e}")
+    except Exception:
         shutil.copy2(src, dst)
         if progress_callback:
             progress_callback(100)

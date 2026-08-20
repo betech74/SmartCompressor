@@ -101,14 +101,12 @@ def compress(src, dst, use_gpu=False, progress_callback=None):
             progress_callback(100)
         return True
 
-    except Exception as e:
-        print(f"Erreur compression vidéo {src} : {e}")
-
+    except Exception:
         try:
             if os.path.isfile(dst):
                 os.remove(dst)
-        except OSError as cleanup_error:
-            print(f"Erreur nettoyage sortie video {dst} : {cleanup_error}")
+        except OSError:
+            pass
         if progress_callback:
             progress_callback(100)
         return False

@@ -832,7 +832,7 @@ class App(TkinterDnD.Tk):
             return "log_error"
         if "attention" in t or "warning" in t or "warn" in t:
             return "log_warn"
-        if "✅" in text or "termin" in t or "finished" in t or "done" in t:
+        if "termin" in t or "finished" in t or "done" in t:
             return "log_success"
         if "analyse" in t or "analysis" in t or "compression" in t or "compress" in t:
             return "log_info"
@@ -961,7 +961,11 @@ class App(TkinterDnD.Tk):
                 except OSError as exc:
                     self._analysis_queue.put((
                         "log",
-                        f"Erreur: fichier ignoré, taille inaccessible: {f} ({exc})",
+                        self.t(
+                            "log_analysis_file_error",
+                            path=f,
+                            error=exc,
+                        ),
                     ))
                     continue
 
@@ -1023,7 +1027,7 @@ class App(TkinterDnD.Tk):
             elif kind == "error":
                 self._analysis_running = False
                 self.files_to_process.clear()
-                self.log(f"Erreur pendant l'analyse: {event[1]}")
+                self.log(self.t("log_analysis_error", error=event[1]))
                 self.btn_analyze.configure(state="normal")
                 self.btn_compress.configure(state="disabled")
 
@@ -1125,7 +1129,13 @@ class App(TkinterDnD.Tk):
         try:
             os.makedirs(output_root, exist_ok=True)
         except OSError as exc:
-            self.log(f"Erreur: destination inaccessible: {output_root} ({exc})")
+            self.log(
+                self.t(
+                    "log_destination_error",
+                    path=output_root,
+                    error=exc,
+                )
+            )
             log_event(f"Compression stopped: destination unavailable: {output_root} error={exc}")
             self.after(0, self.btn_compress.configure, {"state": "normal"})
             return
@@ -1145,7 +1155,13 @@ class App(TkinterDnD.Tk):
             try:
                 f_size = os.path.getsize(f)
             except OSError as exc:
-                self.log(f"Erreur: fichier source ignoré: {f} ({exc})")
+                self.log(
+                    self.t(
+                        "log_source_error",
+                        path=f,
+                        error=exc,
+                    )
+                )
                 if ext in SUPPORTED_IMAGE + SUPPORTED_VIDEO:
                     failed_files.append(f)
                 self._update_global_progress(i, total_files)
@@ -1163,14 +1179,24 @@ class App(TkinterDnD.Tk):
             if not success:
                 if ext in SUPPORTED_IMAGE + SUPPORTED_VIDEO:
                     failed_files.append(f)
-                self.log(f"Erreur: sortie non créée pour {os.path.basename(f)}")
+                self.log(
+                    self.t(
+                        "log_output_missing",
+                        name=os.path.basename(f),
+                    )
+                )
                 log_event(f"Compression failed: source={f} output={dst}")
                 try:
                     destination_available = os.path.isdir(output_root)
                 except OSError:
                     destination_available = False
                 if not destination_available:
-                    self.log(f"Erreur: destination NAS indisponible, arrêt: {output_root}")
+                    self.log(
+                        self.t(
+                            "log_nas_error",
+                            path=output_root,
+                        )
+                    )
                     log_event(f"Compression stopped: NAS unavailable: {output_root}")
                     aborted = True
                     break
@@ -1183,7 +1209,13 @@ class App(TkinterDnD.Tk):
             except OSError as exc:
                 if ext in SUPPORTED_IMAGE + SUPPORTED_VIDEO:
                     failed_files.append(f)
-                self.log(f"Erreur: sortie inaccessible pour {os.path.basename(f)} ({exc})")
+                self.log(
+                    self.t(
+                        "log_output_error",
+                        name=os.path.basename(f),
+                        error=exc,
+                    )
+                )
                 log_event(f"Output size unavailable: {dst} error={exc}")
                 aborted = True
                 break
@@ -1194,9 +1226,10 @@ class App(TkinterDnD.Tk):
                 self.after(0, self.update_file_progress, 100)
             self.log(
                 self.t(
-                    "log_compressed_percent",
+                    "log_compressed_size",
                     name=os.path.basename(f),
-                    percent=f"{percent_file:.1f}%",
+                    original=human(original_size),
+                    compressed=human(compressed_size),
                 )
             )
             log_event(
@@ -1232,8 +1265,9 @@ class App(TkinterDnD.Tk):
         self.log(self.t("log_total_compressed", value=human(self.total_compressed)))
         self.log(self.t("log_total_gain", value=human(self.total_original - self.total_compressed)))
         self.log(self.t("log_separator"))
-        self.after(0, self.progress_global_label.config, {"text": "100%" if not aborted else "Arrêté"})
-        self.after(0, self.progress_file_label.config, {"text": "100%" if not aborted else "Arrêté"})
+        status = "100%" if not aborted else self.t("progress_stopped")
+        self.after(0, self.progress_global_label.config, {"text": status})
+        self.after(0, self.progress_file_label.config, {"text": status})
         self.after(0, self.btn_compress.configure, {"state": "normal"})
 
     def update_file_progress(self, percent):

@@ -41,24 +41,17 @@ def dispatch(task):
         if not success:
             raise OSError(f"La sortie n'a pas été créée: {dst}")
 
-    except Exception as e:
-        print(f"Erreur lors du traitement de {task[0]} : {e}")
-
+    except Exception:
         if not media:
             try:
                 import shutil
                 shutil.copy2(task[0], task[1])
                 success = os.path.isfile(task[1])
-            except Exception as e2:
-                print(f"Erreur fallback copie {task[0]} : {e2}")
-
+            except Exception:
+                pass
     return task[0], task[1], success
 
 def run(tasks):
-    """
-    Tri des tâches par priorité et exécution
-    PDF -> Textes -> Images -> Vidéos
-    """
     pdf_tasks = []
     text_tasks = []
     image_tasks = []

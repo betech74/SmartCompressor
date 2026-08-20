@@ -20,6 +20,3 @@ def main(src_dir, dst_dir):
 
     run(tasks)
     generate("rapport.csv", [(t[0], t[1]) for t in tasks])
-
-if __name__ == "__main__":
-    print("Utilisé via la GUI")

@@ -51,18 +51,16 @@ def compress(src, dst, use_gpu=False, progress_callback=None):
         return True
 
     except PermissionError:
-        print(f"Erreur accès image {src}")
         if progress_callback:
             progress_callback(100)
         return False
 
-    except Exception as e:
-        print(f"Erreur compression image {src} : {e}")
+    except Exception:
         try:
             if os.path.isfile(dst):
                 os.remove(dst)
-        except OSError as cleanup_error:
-            print(f"Erreur nettoyage sortie image {dst} : {cleanup_error}")
+        except OSError:
+            pass
         if progress_callback:
             progress_callback(100)
         return False

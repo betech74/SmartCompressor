@@ -3,7 +3,6 @@ import subprocess
 
 
 def hidden_process_kwargs():
-    """Paramètres pour lancer un programme Windows sans fenêtre console."""
     if os.name != "nt":
         return {}
 

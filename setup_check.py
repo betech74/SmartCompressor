@@ -11,22 +11,13 @@ try:
 except Exception:
     bundled_path = None
 
-def ok(msg):    print(f"✅ {msg}")
-def warn(msg):  print(f"⚠️  {msg}")
 def fail(msg):
-    print(f"❌ {msg}")
     sys.exit(1)
 
 def is_frozen_exe() -> bool:
-    """True si lancé depuis un exe PyInstaller (onefile/onedir)."""
     return bool(getattr(sys, "frozen", False))
 
 def get_ffmpeg_paths():
-    """
-    Retourne (ffmpeg_path, ffprobe_path, env) selon le contexte.
-    - En exe : tente d'utiliser /ffmpeg/ffmpeg.exe et /ffmpeg/ffprobe.exe embarqués
-    - En dev : utilise PATH
-    """
     env = os.environ.copy()
 
     if is_frozen_exe() and bundled_path is not None:
@@ -43,7 +34,7 @@ def get_ffmpeg_paths():
 def check_python():
     if sys.version_info < (3, 9):
         fail("Python 3.9+ requis")
-    ok(f"Python {sys.version.split()[0]}")
+    return True
 
 def check_ffmpeg():
     ffmpeg, _, env = get_ffmpeg_paths()
@@ -60,7 +51,7 @@ def check_ffmpeg():
             env=env,
             **hidden_process_kwargs(),
         )
-        ok("FFmpeg détecté")
+        return True
     except Exception:
         fail("FFmpeg présent mais inutilisable")
 
@@ -77,13 +68,10 @@ def check_nvenc():
         )
 
         if ("h264_nvenc" in r.stdout) or ("hevc_nvenc" in r.stdout):
-            ok("NVENC (GPU NVIDIA) disponible")
             return True
         else:
-            warn("NVENC non détecté → CPU utilisé")
             return False
     except Exception:
-        warn("Impossible de détecter NVENC")
         return False
 
 def check_module(name):
@@ -98,37 +86,23 @@ def check_dependencies():
     }
 
     for label, module in required.items():
-        if check_module(module):
-            ok(f"{label} installé")
-        else:
+        if not check_module(module):
             fail(f"Dépendance manquante : {label}")
+    return True
 
 def check_cpu():
-    cores = os.cpu_count()
-    if cores and cores < 2:
-        warn("1 seul cœur CPU détecté")
-    else:
-        ok(f"{cores} cœurs CPU détectés")
+    return os.cpu_count() or 1
 
 def run_all_checks():
-    """
-    En dev : checks complets + retourne True/False pour NVENC
-    En exe : ne bloque pas l'app (retourne juste has_nvenc() ou False)
-    """
-
     if is_frozen_exe():
-        print("\n🔍 Mode EXE détecté → checks dev ignorés.\n")
-
         try:
             return check_nvenc()
         except Exception:
             return False
 
-    print("\n🔍 Vérification du setup...\n")
     check_python()
     check_ffmpeg()
     check_dependencies()
     check_cpu()
     nvenc = check_nvenc()
-    print("\n✅ Environnement valide\n")
     return nvenc

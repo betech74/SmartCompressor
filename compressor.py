@@ -1,11 +1,14 @@
 import os
+import json
 import subprocess
 from tkinter import Tk, filedialog
 from PIL import Image
 import fitz
 import brotli
 from tqdm import tqdm
+import config
 from utils.process import hidden_process_kwargs
+from utils.paths import bundled_path
 
 IMAGE_QUALITY = 75
 VIDEO_CRF = 28
@@ -14,6 +17,20 @@ USE_GPU = True
 SUPPORTED_VIDEO = (".mp4", ".mkv", ".avi")
 SUPPORTED_IMAGE = (".jpg", ".jpeg", ".png")
 SUPPORTED_TEXT = (".txt", ".json", ".csv")
+
+def t(key, **kwargs):
+    try:
+        path = bundled_path(f"assets/locales/{config.LANG}.json")
+        with open(path, "r", encoding="utf-8") as f:
+            translations = json.load(f)
+        text = translations.get(key, key)
+    except Exception:
+        text = key
+
+    try:
+        return text.format(**kwargs)
+    except Exception:
+        return text
 
 def choose_folder(title):
     root = Tk()
@@ -78,8 +95,8 @@ def compress_video(src, dst):
     )
 
 def main():
-    print("\nSelect source folder")
-    src_dir = choose_folder("Select folder to compress")
+    print(t("cli_select_source"))
+    src_dir = choose_folder(t("cli_source_dialog"))
     if not src_dir:
         return
 
@@ -87,7 +104,7 @@ def main():
     total_original = 0
     total_estimated = 0
 
-    print("\nANALYSIS & ESTIMATION\n")
+    print(t("cli_analyzing"))
     for root, _, filenames in os.walk(src_dir):
         for f in filenames:
             path = os.path.join(root, f)
@@ -103,30 +120,23 @@ def main():
             total_estimated += est
 
             files.append((path, ext))
-            print(f"{f}")
-            print(f"  Original : {human(orig)}")
-            print(f"  Estimated: {human(est)}")
-            print(f"  Saved    : {human(orig - est)}\n")
+    print(t("cli_analysis_done", count=len(files)))
+    print(t("cli_original_size", size=human(total_original)))
+    print(t("cli_estimated_size", size=human(total_estimated)))
 
-    print("=================================")
-    print(f"TOTAL ORIGINAL : {human(total_original)}")
-    print(f"TOTAL ESTIMATED: {human(total_estimated)}")
-    print(f"TOTAL SAVED   : {human(total_original - total_estimated)}")
-    print("=================================\n")
-
-    confirm = input("Type 'OK' to start compression: ")
+    confirm = input(t("cli_confirm"))
     if confirm.strip().upper() != "OK":
-        print("Cancelled")
+        print(t("cli_cancelled"))
         return
 
-    print("\nSelect destination folder")
-    dst_dir = choose_folder("Select destination folder")
+    print(t("cli_select_destination"))
+    dst_dir = choose_folder(t("cli_destination_dialog"))
     if not dst_dir:
         return
 
-    print("\nCOMPRESSION IN PROGRESS...\n")
+    print(t("cli_compressing"))
 
-    for path, ext in tqdm(files):
+    for path, ext in tqdm(files, desc=t("cli_progress")):
         rel = os.path.relpath(path, src_dir)
         dst_path = os.path.join(dst_dir, rel)
         os.makedirs(os.path.dirname(dst_path), exist_ok=True)
@@ -141,9 +151,9 @@ def main():
             elif ext in SUPPORTED_TEXT:
                 compress_text(path, dst_path)
         except Exception as e:
-            print(f"Error on {path}: {e}")
+            print(t("cli_skipped", path=path, error=e))
 
-    print("\nCompression finished")
+    print(t("cli_finished"))
 
 if __name__ == "__main__":
     main()

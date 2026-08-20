@@ -10,11 +10,6 @@ except Exception:
     bundled_path = None
 
 def _ffmpeg_cmd_and_env():
-    """
-    Retourne (cmd_ffmpeg, env) en fonction du contexte:
-    - en exe PyInstaller: ffmpeg embarqué dans /ffmpeg/ffmpeg.exe
-    - en dev: 'ffmpeg' via PATH
-    """
     env = os.environ.copy()
 
     if getattr(sys, "frozen", False) and bundled_path is not None:

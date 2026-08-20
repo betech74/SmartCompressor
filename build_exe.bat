@@ -27,7 +27,7 @@ if not exist "%SPEC%" (
 )
 
 echo [1/3] Verification de PyInstaller...
-"%PYTHON%" -c "import PyInstaller; print('        PyInstaller OK - ' + PyInstaller.__file__)"
+"%PYTHON%" -c "import PyInstaller"
 if errorlevel 1 (
     echo.
     echo [ERREUR] PyInstaller n'est pas installe dans le venv.
@@ -35,6 +35,7 @@ if errorlevel 1 (
     echo   "%PYTHON%" -m pip install -r requirements-dev.txt
     goto :failed
 )
+echo        PyInstaller disponible.
 
 echo.
 echo [2/3] Compilation en cours...

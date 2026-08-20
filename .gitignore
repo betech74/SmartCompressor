@@ -5,3 +5,11 @@ build/
 dist/
 *.egg-info/
 Publication/
+node_modules/
+debug/
+release/
+react/src-tauri/target/
+react/dist/
+*.tag
+*.TAG
+/react/*

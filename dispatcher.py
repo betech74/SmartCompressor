@@ -9,7 +9,6 @@ from compressors import (
 )
 
 IMAGE_WORKERS = min(8, os.cpu_count() or 4)
-VIDEO_WORKERS = min(8, os.cpu_count() or 4)
 
 VIDEO_PARALLEL_THRESHOLD = 10 * 1024 * 1024
 
@@ -17,7 +16,10 @@ def dispatch(task):
     success = False
     media = task[2].lower() in SUPPORTED_IMAGE + SUPPORTED_VIDEO
     try:
-        if len(task) == 5:
+        control = None
+        if len(task) == 6:
+            src, dst, ext, use_gpu, progress_callback, control = task
+        elif len(task) == 5:
             src, dst, ext, use_gpu, progress_callback = task
         else:
             src, dst, ext, use_gpu = task
@@ -29,7 +31,13 @@ def dispatch(task):
         if ext_lower in SUPPORTED_IMAGE:
             result = image_compressor.compress(src, dst, use_gpu=use_gpu, progress_callback=progress_callback)
         elif ext_lower in SUPPORTED_VIDEO:
-            result = video_compressor.compress(src, dst, use_gpu=use_gpu, progress_callback=progress_callback)
+            result = video_compressor.compress(
+                src,
+                dst,
+                use_gpu=use_gpu,
+                progress_callback=progress_callback,
+                control=control,
+            )
         elif ext_lower in SUPPORTED_TEXT:
             result = text_compressor.compress(src, dst, progress_callback=progress_callback)
         elif ext_lower in SUPPORTED_PDF:
@@ -82,9 +90,8 @@ def run(tasks):
     with ThreadPoolExecutor(max_workers=IMAGE_WORKERS) as executor:
         list(executor.map(dispatch, image_tasks))
 
-    if video_small_tasks:
-        with ThreadPoolExecutor(max_workers=VIDEO_WORKERS) as executor:
-            list(executor.map(dispatch, video_small_tasks))
+    for task in video_small_tasks:
+        dispatch(task)
 
     for task in video_large_tasks:
         dispatch(task)

@@ -7,6 +7,7 @@ import time
 import threading
 import json
 import queue
+from concurrent.futures import ThreadPoolExecutor
 import config
 from tkinter import (
     Tk,
@@ -67,6 +68,22 @@ def tr(i18n: dict, key: str, **kwargs) -> str:
         return text.format(**kwargs)
     except Exception:
         return text
+
+def format_duration(seconds: float | None) -> str:
+    if seconds is None:
+        return "--:--"
+    total_seconds = max(0, int(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+class CompressionControl:
+    def __init__(self):
+        self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.condition = threading.Condition()
 
 class AppDialog(Toplevel):
     def __init__(self, parent, title: str, message: str, kind: str = "info", ok_text: str = "OK", log_folder: str | None = None):
@@ -467,6 +484,16 @@ class App(TkinterDnD.Tk):
         self._bg_frames = []
         self._settings_apply_theme = None
         self._settings_window = None
+        self._file_progress_name = ""
+        self._compression_started_at = None
+        self._compression_total_bytes = 0
+        self._compression_completed_bytes = 0
+        self._compression_speed = 0.0
+        self._current_file_size = 0
+        self._current_file_index = 0
+        self._compression_total_files = 0
+        self._compression_control = None
+        self._compression_paused = False
 
         self.drop_target_register(DND_FILES)
         self.dnd_bind("<<Drop>>", self.on_drop)
@@ -567,6 +594,28 @@ class App(TkinterDnD.Tk):
         self.btn_compress = btn_compress
         self._register_text(btn_compress, "btn_compress")
 
+        btn_pause_resume = ttk.Button(
+            inner_options,
+            text=self.t("btn_pause"),
+            command=self.toggle_pause_compression,
+            width=12,
+            style="Uiverse.TButton",
+            state="disabled",
+        )
+        btn_pause_resume.grid(row=2, column=1, padx=6, pady=(8, 4), sticky=W)
+        self.btn_pause_resume = btn_pause_resume
+
+        btn_stop = ttk.Button(
+            inner_options,
+            text=self.t("btn_stop"),
+            command=self.stop_compression,
+            width=12,
+            style="Uiverse.TButton",
+            state="disabled",
+        )
+        btn_stop.grid(row=3, column=1, padx=6, pady=4, sticky=W)
+        self.btn_stop = btn_stop
+
         btn_settings = ttk.Button(
             inner_options,
             text=self.t("btn_settings"),
@@ -632,6 +681,12 @@ class App(TkinterDnD.Tk):
         self.progress_global.pack(fill=X, expand=True, pady=(6, 4))
         self.progress_global_label = ttk.Label(inner_progress, text="0%", style="Muted.TLabel")
         self.progress_global_label.pack(anchor=W)
+        self.progress_eta_label = ttk.Label(
+            inner_progress,
+            text=self.t("progress_timing", elapsed="00:00", remaining="--:--"),
+            style="Muted.TLabel",
+        )
+        self.progress_eta_label.pack(anchor=W)
 
         frame_file_outer = ttk.Frame(self, style="TFrame")
         frame_file_outer.pack(pady=(0, 6), padx=16, fill=X)
@@ -646,9 +701,12 @@ class App(TkinterDnD.Tk):
         inner_file = ttk.Frame(self.frame_prog_file, style="CardInner.TFrame")
         inner_file.pack(fill=X, padx=10, pady=8)
 
-        self.lbl_prog_file = ttk.Label(inner_file, text=self.t("progress_file"), style="Muted.TLabel")
+        self.lbl_prog_file = ttk.Label(
+            inner_file,
+            text=self.t("progress_file_name", name="-"),
+            style="Muted.TLabel",
+        )
         self.lbl_prog_file.pack(anchor=W)
-        self._register_text(self.lbl_prog_file, "progress_file")
 
         self.progress_file = ttk.Progressbar(
             inner_file,
@@ -811,6 +869,19 @@ class App(TkinterDnD.Tk):
             self.dst_label.config(text=self.t("dst_not_selected"))
         else:
             self.dst_label.config(text=self.t("dst_selected", path=self.dst_dir))
+        if hasattr(self, "btn_pause_resume"):
+            self.btn_pause_resume.config(
+                text=self.t("btn_resume" if self._compression_paused else "btn_pause")
+            )
+        if hasattr(self, "btn_stop"):
+            self.btn_stop.config(text=self.t("btn_stop"))
+        self.lbl_prog_file.config(
+            text=self.t("progress_file_name", name=self._file_progress_name or "-")
+        )
+        if self._compression_started_at is None:
+            self.progress_eta_label.config(
+                text=self.t("progress_timing", elapsed="00:00", remaining="--:--")
+            )
 
     def show_dialog(self, title: str, message: str, kind: str = "info", log_folder: str | None = None):
         log_event(f"Dialog requested: kind={kind}")
@@ -1061,12 +1132,63 @@ class App(TkinterDnD.Tk):
 
         self.clear_log()
         self.failed_files = []
+        self._compression_control = CompressionControl()
+        self._compression_paused = False
         self.btn_compress.configure(state="disabled")
+        self.btn_pause_resume.configure(state="normal", text=self.t("btn_pause"))
+        self.btn_stop.configure(state="normal")
         threading.Thread(
             target=self.compress_thread,
             name="compression",
             daemon=True,
         ).start()
+
+    def toggle_pause_compression(self):
+        control = self._compression_control
+        if control is None:
+            return
+        with control.condition:
+            if control.pause_event.is_set():
+                control.pause_event.clear()
+                self._compression_paused = False
+                self.btn_pause_resume.configure(text=self.t("btn_pause"))
+                self.log(self.t("log_resumed"))
+            else:
+                control.pause_event.set()
+                self._compression_paused = True
+                self.btn_pause_resume.configure(text=self.t("btn_resume"))
+                self.log(self.t("log_pause_requested"))
+            control.condition.notify_all()
+
+    def stop_compression(self):
+        control = self._compression_control
+        if control is None:
+            return
+        control.stop_event.set()
+        with control.condition:
+            control.pause_event.clear()
+            control.condition.notify_all()
+        self.btn_stop.configure(state="disabled")
+        self.btn_pause_resume.configure(state="disabled")
+        self.log(self.t("log_stop_requested"))
+
+    def _wait_for_pause(self):
+        control = self._compression_control
+        if control is None:
+            return False
+        with control.condition:
+            while control.pause_event.is_set() and not control.stop_event.is_set():
+                control.condition.wait(timeout=0.2)
+        return control.stop_event.is_set()
+
+    def _finish_compression_controls(self):
+        self._compression_paused = False
+        self._compression_control = None
+        self.btn_pause_resume.configure(
+            state="disabled",
+            text=self.t("btn_pause"),
+        )
+        self.btn_stop.configure(state="disabled")
 
     def _prepare_file_progress(self, visible):
         if visible:
@@ -1081,6 +1203,57 @@ class App(TkinterDnD.Tk):
             self.progress_file.pack_forget()
             self.progress_file_label.pack_forget()
 
+    def _set_file_progress_title(self, path):
+        if path and self.src_dir:
+            try:
+                name = os.path.relpath(path, self.src_dir)
+            except ValueError:
+                name = os.path.basename(path)
+        else:
+            name = "-"
+        self._file_progress_name = name
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                self.after(0, self._set_file_progress_title, path)
+            except RuntimeError:
+                pass
+            return
+        self.lbl_prog_file.config(text=self.t("progress_file_name", name=name))
+
+    def _update_eta(self, processed_bytes):
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                self.after(0, self._update_eta, processed_bytes)
+            except RuntimeError:
+                pass
+            return
+
+        started_at = self._compression_started_at
+        total_bytes = self._compression_total_bytes
+        if started_at is None:
+            return
+        elapsed = max(0.0, time.monotonic() - started_at)
+        processed = min(max(0, processed_bytes), total_bytes)
+        instant_speed = processed / elapsed if elapsed > 0 and processed > 0 else 0
+        if instant_speed > 0:
+            self._compression_speed = (
+                self._compression_speed * 0.7 + instant_speed * 0.3
+                if self._compression_speed > 0
+                else instant_speed
+            )
+        remaining = (
+            (total_bytes - processed) / self._compression_speed
+            if self._compression_speed > 0
+            else None
+        )
+        self.progress_eta_label.config(
+            text=self.t(
+                "progress_timing",
+                elapsed=format_duration(elapsed),
+                remaining=format_duration(remaining),
+            )
+        )
+
     def _update_global_progress(self, current, total, file_percent=100):
         if threading.current_thread() is not threading.main_thread():
             try:
@@ -1089,8 +1262,16 @@ class App(TkinterDnD.Tk):
                 pass
             return
 
-        self.progress_global["value"] = current
-        global_percent = ((current - 1) + file_percent / 100) / total * 100 if total else 100
+        if self._compression_total_bytes:
+            processed_bytes = self._compression_completed_bytes + (
+                self._current_file_size * max(0, min(100, file_percent)) / 100
+            )
+            global_percent = processed_bytes / self._compression_total_bytes * 100
+            self._update_eta(processed_bytes)
+        else:
+            global_percent = ((current - 1) + file_percent / 100) / total * 100 if total else 100
+            self._update_eta(0)
+        self.progress_global["value"] = global_percent
         self.progress_global_label.config(
             text=self.t(
                 "progress_files",
@@ -1107,8 +1288,178 @@ class App(TkinterDnD.Tk):
             except RuntimeError:
                 pass
             return
-        self.progress_global["maximum"] = total
+        self.progress_global["maximum"] = 100
         self.progress_global["value"] = 0
+
+    def _compress_file_worker(
+        self,
+        path,
+        use_gpu,
+        output_root,
+        progress_callback=None,
+        control=None,
+    ):
+        relative = os.path.relpath(path, self.src_dir)
+        output = os.path.join(output_root, relative)
+        extension = os.path.splitext(path)[1].lower()
+        try:
+            original_size = os.path.getsize(path)
+        except OSError as exc:
+            return {
+                "path": path,
+                "output": output,
+                "extension": extension,
+                "original_size": None,
+                "compressed_size": None,
+                "status": "source_error",
+                "error": exc,
+            }
+
+        try:
+            os.makedirs(os.path.dirname(output), exist_ok=True)
+        except OSError as exc:
+            return {
+                "path": path,
+                "output": output,
+                "extension": extension,
+                "original_size": original_size,
+                "compressed_size": None,
+                "status": "output_missing",
+                "error": exc,
+                "destination_available": os.path.isdir(output_root),
+            }
+
+        try:
+            result = dispatch(
+                (path, output, extension, use_gpu, progress_callback, control)
+            )
+            success = result[2] if len(result) > 2 else os.path.isfile(output)
+        except Exception as exc:
+            success = False
+            error = exc
+        else:
+            error = None
+
+        if not success:
+            return {
+                "path": path,
+                "output": output,
+                "extension": extension,
+                "original_size": original_size,
+                "compressed_size": None,
+                "status": "output_missing",
+                "error": error,
+                "destination_available": os.path.isdir(output_root),
+            }
+
+        try:
+            compressed_size = os.path.getsize(output)
+        except OSError as exc:
+            return {
+                "path": path,
+                "output": output,
+                "extension": extension,
+                "original_size": original_size,
+                "compressed_size": None,
+                "status": "output_size_error",
+                "error": exc,
+                "destination_available": os.path.isdir(output_root),
+            }
+
+        return {
+            "path": path,
+            "output": output,
+            "extension": extension,
+            "original_size": original_size,
+            "compressed_size": compressed_size,
+            "status": "success",
+            "error": None,
+            "destination_available": True,
+        }
+
+    def _record_compression_result(self, result, index, total, failed_files):
+        path = result["path"]
+        extension = result["extension"]
+        original_size = result["original_size"]
+        self._current_file_index = index
+        self._current_file_size = original_size or 0
+        self._set_file_progress_title(path)
+        self.log(self.t("log_compressing", name=os.path.basename(path)))
+        log_event(f"Compressing file: {path}")
+
+        if result["status"] == "source_error":
+            self.log(
+                self.t(
+                    "log_source_error",
+                    path=path,
+                    error=result["error"],
+                )
+            )
+            if extension in SUPPORTED_IMAGE + SUPPORTED_VIDEO:
+                failed_files.append(path)
+            self._update_global_progress(index, total)
+            return False
+
+        if result["status"] == "output_missing":
+            if extension in SUPPORTED_IMAGE + SUPPORTED_VIDEO:
+                failed_files.append(path)
+            self.log(
+                self.t(
+                    "log_output_missing",
+                    name=os.path.basename(path),
+                )
+            )
+            log_event(f"Compression failed: source={path} output={result['output']}")
+            if not result.get("destination_available", False):
+                self.log(
+                    self.t(
+                        "log_nas_error",
+                        path=os.path.dirname(result["output"]),
+                    )
+                )
+                log_event(f"Compression stopped: NAS unavailable: {result['output']}")
+                return True
+            self._compression_completed_bytes += original_size or 0
+            self._update_global_progress(index, total)
+            return False
+
+        if result["status"] == "output_size_error":
+            if extension in SUPPORTED_IMAGE + SUPPORTED_VIDEO:
+                failed_files.append(path)
+            self.log(
+                self.t(
+                    "log_output_error",
+                    name=os.path.basename(path),
+                    error=result["error"],
+                )
+            )
+            log_event(f"Output size unavailable: {result['output']} error={result['error']}")
+            self._compression_completed_bytes += original_size or 0
+            return True
+
+        compressed_size = result["compressed_size"]
+        self.total_compressed += compressed_size
+        percent_file = (
+            (compressed_size / original_size) * 100
+            if original_size and original_size > 0
+            else 100
+        )
+        self.log(
+            self.t(
+                "log_compressed_size",
+                name=os.path.basename(path),
+                original=human(original_size),
+                compressed=human(compressed_size),
+            )
+        )
+        log_event(
+            "Compressed file: "
+            f"path={path} original={original_size} compressed={compressed_size} "
+            f"percent={percent_file:.1f}"
+        )
+        self._compression_completed_bytes += original_size or 0
+        self._update_global_progress(index, total, 100)
+        return False
 
     def compress_thread(self):
         if not self.files_to_process:
@@ -1122,6 +1473,18 @@ class App(TkinterDnD.Tk):
         use_gpu = has_nvenc()
         log_event(f"Compression started: files={len(self.files_to_process)} use_gpu={use_gpu}")
         total_files = len(self.files_to_process)
+        self._compression_started_at = time.monotonic()
+        self._compression_total_files = total_files
+        self._compression_completed_bytes = 0
+        self._compression_speed = 0.0
+        self._current_file_size = 0
+        self._current_file_index = 0
+        self._compression_total_bytes = 0
+        for path in self.files_to_process:
+            try:
+                self._compression_total_bytes += os.path.getsize(path)
+            except OSError:
+                continue
         self.total_compressed = 0
         source_folder_name = os.path.basename(os.path.normpath(self.src_dir))
         output_root = os.path.join(self.dst_dir, source_folder_name)
@@ -1138,107 +1501,81 @@ class App(TkinterDnD.Tk):
             )
             log_event(f"Compression stopped: destination unavailable: {output_root} error={exc}")
             self.after(0, self.btn_compress.configure, {"state": "normal"})
+            self.after(0, self._finish_compression_controls)
             return
 
         self._prepare_global_progress(total_files)
         aborted = False
         failed_files = []
 
-        for i, f in enumerate(self.files_to_process, 1):
-            rel = os.path.relpath(f, self.src_dir)
-            dst = os.path.join(self.dst_dir, source_folder_name, rel)
-            ext = os.path.splitext(f)[1].lower()
+        image_files = [
+            (index, path)
+            for index, path in enumerate(self.files_to_process, 1)
+            if os.path.splitext(path)[1].lower() in SUPPORTED_IMAGE
+        ]
+        other_files = [
+            (index, path)
+            for index, path in enumerate(self.files_to_process, 1)
+            if os.path.splitext(path)[1].lower() not in SUPPORTED_IMAGE
+        ]
+        image_workers = 2
 
-            self.log(self.t("log_compressing", name=os.path.basename(f)))
-            log_event(f"Compressing file: {f}")
-
-            try:
-                f_size = os.path.getsize(f)
-            except OSError as exc:
-                self.log(
-                    self.t(
-                        "log_source_error",
-                        path=f,
-                        error=exc,
-                    )
-                )
-                if ext in SUPPORTED_IMAGE + SUPPORTED_VIDEO:
-                    failed_files.append(f)
-                self._update_global_progress(i, total_files)
-                continue
-
-            if f_size > 10 * 1024 * 1024:
-                self.after(0, self._prepare_file_progress, True)
-                cb = self.update_file_progress
-            else:
-                self.after(0, self._prepare_file_progress, False)
-                cb = None
-
-            result = dispatch((f, dst, ext, use_gpu, cb))
-            success = result[2] if len(result) > 2 else os.path.isfile(dst)
-            if not success:
-                if ext in SUPPORTED_IMAGE + SUPPORTED_VIDEO:
-                    failed_files.append(f)
-                self.log(
-                    self.t(
-                        "log_output_missing",
-                        name=os.path.basename(f),
-                    )
-                )
-                log_event(f"Compression failed: source={f} output={dst}")
-                try:
-                    destination_available = os.path.isdir(output_root)
-                except OSError:
-                    destination_available = False
-                if not destination_available:
-                    self.log(
-                        self.t(
-                            "log_nas_error",
-                            path=output_root,
-                        )
-                    )
-                    log_event(f"Compression stopped: NAS unavailable: {output_root}")
-                    aborted = True
-                    break
-                self._update_global_progress(i, total_files)
-                continue
-
-            original_size = f_size
-            try:
-                compressed_size = os.path.getsize(dst)
-            except OSError as exc:
-                if ext in SUPPORTED_IMAGE + SUPPORTED_VIDEO:
-                    failed_files.append(f)
-                self.log(
-                    self.t(
-                        "log_output_error",
-                        name=os.path.basename(f),
-                        error=exc,
-                    )
-                )
-                log_event(f"Output size unavailable: {dst} error={exc}")
+        for start in range(0, len(image_files), image_workers):
+            if self._wait_for_pause():
                 aborted = True
                 break
-            self.total_compressed += compressed_size
+            batch = image_files[start:start + image_workers]
+            with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+                futures = [
+                    executor.submit(
+                        self._compress_file_worker,
+                        path,
+                        use_gpu,
+                        output_root,
+                        None,
+                        self._compression_control,
+                    )
+                    for _, path in batch
+                ]
+                for (index, _), future in zip(batch, futures):
+                    if self._record_compression_result(
+                        future.result(),
+                        index,
+                        total_files,
+                        failed_files,
+                    ):
+                        aborted = True
+                        break
+            if aborted:
+                break
 
-            percent_file = (compressed_size / original_size) * 100 if original_size > 0 else 100
-            if cb:
-                self.after(0, self.update_file_progress, 100)
-            self.log(
-                self.t(
-                    "log_compressed_size",
-                    name=os.path.basename(f),
-                    original=human(original_size),
-                    compressed=human(compressed_size),
+        if not aborted:
+            for index, path in other_files:
+                if self._wait_for_pause():
+                    aborted = True
+                    break
+                extension = os.path.splitext(path)[1].lower()
+                try:
+                    file_size = os.path.getsize(path)
+                except OSError:
+                    file_size = 0
+                callback = self.update_file_progress if file_size > 10 * 1024 * 1024 else None
+                self.after(0, self._prepare_file_progress, callback is not None)
+                result = self._compress_file_worker(
+                    path,
+                    use_gpu,
+                    output_root,
+                    callback,
+                    self._compression_control,
                 )
-            )
-            log_event(
-                "Compressed file: "
-                f"path={f} original={original_size} compressed={compressed_size} "
-                f"percent={percent_file:.1f}"
-            )
-
-            self._update_global_progress(i, total_files, 100)
+                if self._record_compression_result(
+                    result,
+                    index,
+                    total_files,
+                    failed_files,
+                ):
+                    aborted = True
+                    break
 
         if not aborted:
             self.log(
@@ -1265,10 +1602,28 @@ class App(TkinterDnD.Tk):
         self.log(self.t("log_total_compressed", value=human(self.total_compressed)))
         self.log(self.t("log_total_gain", value=human(self.total_original - self.total_compressed)))
         self.log(self.t("log_separator"))
+        elapsed = (
+            max(0.0, time.monotonic() - self._compression_started_at)
+            if self._compression_started_at is not None
+            else 0.0
+        )
+        self.after(
+            0,
+            self.progress_eta_label.config,
+            {
+                "text": self.t(
+                    "progress_timing",
+                    elapsed=format_duration(elapsed),
+                    remaining="00:00" if not aborted else "--:--",
+                )
+            },
+        )
         status = "100%" if not aborted else self.t("progress_stopped")
         self.after(0, self.progress_global_label.config, {"text": status})
         self.after(0, self.progress_file_label.config, {"text": status})
         self.after(0, self.btn_compress.configure, {"state": "normal"})
+        self.after(0, self._finish_compression_controls)
+        self._compression_started_at = None
 
     def update_file_progress(self, percent):
         if threading.current_thread() is not threading.main_thread():
@@ -1280,6 +1635,11 @@ class App(TkinterDnD.Tk):
 
         self.progress_file["value"] = percent
         self.progress_file_label.config(text=f"{percent:.1f}%")
+        self._update_global_progress(
+            self._current_file_index,
+            self._compression_total_files,
+            percent,
+        )
 
     def open_settings_window(self):
         if self._settings_window and self._settings_window.winfo_exists():

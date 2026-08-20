@@ -5,7 +5,7 @@ import config
 from utils.paths import bundled_path
 from utils.process import hidden_process_kwargs
 
-def compress(src, dst, use_gpu=False, progress_callback=None):
+def compress(src, dst, use_gpu=False, progress_callback=None, control=None):
     try:
         if not os.path.isfile(src):
             raise FileNotFoundError(f"Source vidéo introuvable: {src}")
@@ -80,6 +80,9 @@ def compress(src, dst, use_gpu=False, progress_callback=None):
 
         if process.stdout:
             for line in process.stdout:
+                if control is not None and control.stop_event.is_set():
+                    process.terminate()
+                    break
                 if progress_callback and total_duration > 0:
                     line = line.strip()
                     if line.startswith("out_time_ms="):
